@@ -15,6 +15,7 @@ import serveProd from "./lib/serve"
 import WindowState from "./lib/windowState"
 import Status from "./lib/status"
 import Options from "./lib/options"
+import { shouldHandleQuitAsWindowClose, shouldKeepRunningAfterWindowClose } from "./lib/windowLifecycle"
 import os from "os"
 
 if (IS_ELECTRON) {
@@ -54,6 +55,7 @@ export class FilenDesktop {
 	public status: Status
 	public options: Options
 	public shouldExitOnQuit: boolean = false
+	private createMainWindowPromise: Promise<void> | null = null
 
 	/**
 	 * Creates an instance of FilenDesktop.
@@ -127,11 +129,9 @@ export class FilenDesktop {
 				return
 			}
 
-			const options = await this.options.get()
-
 			await app.whenReady()
 
-			if (options.startMinimized && process.platform === "darwin") {
+			if (process.platform === "darwin") {
 				app?.dock?.hide()
 			}
 
@@ -140,19 +140,25 @@ export class FilenDesktop {
 			this.initializeSDK()
 
 			app.on("window-all-closed", () => {
-				this.shouldExitOnQuit = true
+				if (process.platform !== "darwin") {
+					this.shouldExitOnQuit = true
 
-				app.exit(0)
+					app.exit(0)
+				}
+			})
+
+			app.on("before-quit", e => {
+				if (!shouldHandleQuitAsWindowClose(process.platform, this.shouldExitOnQuit)) {
+					return
+				}
+
+				e.preventDefault()
+
+				this.driveWindow?.close()
 			})
 
 			app.on("second-instance", () => {
-				if (this.driveWindow) {
-					if (this.driveWindow.isMinimized()) {
-						this.driveWindow.restore()
-					}
-
-					this.driveWindow.focus()
-				}
+				this.showOrOpenDriveWindow()
 			})
 
 			app.setAppUserModelId("io.filen.desktop")
@@ -163,11 +169,7 @@ export class FilenDesktop {
 			}
 
 			app.on("activate", () => {
-				if (BrowserWindow.getAllWindows().length === 0) {
-					this.createMainWindow().catch(err => {
-						this.logger.log("error", err)
-					})
-				}
+				this.showOrOpenDriveWindow()
 			})
 
 			this.logger.log("info", "Starting worker and creating window")
@@ -254,26 +256,52 @@ export class FilenDesktop {
 	}
 
 	public showOrOpenDriveWindow(): void {
-		if (BrowserWindow.getAllWindows().length === 0) {
-			this.createMainWindow().catch(err => {
+		if (!this.driveWindow) {
+			this.createMainWindow(true).catch(err => {
 				this.logger.log("error", err)
 			})
 
 			return
 		}
 
-		if (this.driveWindow?.isMinimized()) {
-			this.driveWindow?.restore()
+		if (this.driveWindow.isMinimized()) {
+			this.driveWindow.restore()
 		} else {
-			this.driveWindow?.show()
+			this.driveWindow.show()
 		}
+
+		this.driveWindow.focus()
 	}
 
-	private async createMainWindow(): Promise<void> {
+	private async createMainWindow(showWhenReady: boolean = false): Promise<void> {
 		if (this.driveWindow) {
+			if (showWhenReady) {
+				this.showOrOpenDriveWindow()
+			}
+
 			return
 		}
 
+		if (this.createMainWindowPromise) {
+			await this.createMainWindowPromise
+
+			if (showWhenReady) {
+				this.showOrOpenDriveWindow()
+			}
+
+			return
+		}
+
+		this.createMainWindowPromise = this.doCreateMainWindow(showWhenReady)
+
+		try {
+			await this.createMainWindowPromise
+		} finally {
+			this.createMainWindowPromise = null
+		}
+	}
+
+	private async doCreateMainWindow(showWhenReady: boolean): Promise<void> {
 		const [state, options] = await Promise.all([this.windowState.get(), this.options.get()])
 
 		this.driveWindow = new BrowserWindow({
@@ -330,26 +358,28 @@ export class FilenDesktop {
 		})
 
 		this.driveWindow?.on("minimize", () => {
-			if (process.platform === "darwin" && this.minimizeToTray) {
+			if (process.platform === "darwin") {
 				app?.dock?.hide()
 			}
 		})
 
 		this.driveWindow?.on("show", () => {
-			if (process.platform === "darwin" && !app?.dock?.isVisible()) {
-				app?.dock?.show()
+			if (process.platform === "darwin") {
+				app?.dock?.hide()
 			}
 		})
 
 		this.driveWindow?.on("close", e => {
-			if ((process.platform === "darwin" || this.minimizeToTray) && !this.driveWindow?.isMinimized() && !this.shouldExitOnQuit) {
+			if (shouldKeepRunningAfterWindowClose(process.platform, this.shouldExitOnQuit)) {
+				app?.dock?.hide()
+
+				return
+			}
+
+			if (this.minimizeToTray && !this.driveWindow?.isMinimized() && !this.shouldExitOnQuit) {
 				e.preventDefault()
 
 				this.driveWindow?.minimize()
-
-				if (process.platform === "darwin" && this.minimizeToTray) {
-					app?.dock?.hide()
-				}
 			}
 		})
 
@@ -368,8 +398,12 @@ export class FilenDesktop {
 			await this.serve(this.driveWindow)
 		}
 
-		if (!app.commandLine.hasSwitch("hidden") && !process.argv.includes("--hidden") && !options.startMinimized) {
+		if (showWhenReady || (!app.commandLine.hasSwitch("hidden") && !process.argv.includes("--hidden") && !options.startMinimized)) {
 			this.driveWindow?.show()
+		}
+
+		if (showWhenReady) {
+			this.driveWindow?.focus()
 		}
 	}
 }
