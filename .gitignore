@@ -18,3 +18,18 @@ bin/deps/
 build/*.msi
 __pycache__/
 *.pyc
+
+
+# Fork additions (kept in one block at the end so upstream .gitignore edits merge cleanly)
+.env*.local
+*.log
+npm-debug.log*
+coverage/
+.nyc_output/
+.cache/
+.eslintcache
+.AppleDouble
+.LSOverride
+.idea/
+*.swp
+*.swo
