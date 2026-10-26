@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, dialog, crashReporter } from "electron"
+import { app, BrowserWindow, shell, dialog, crashReporter, Menu } from "electron"
 import pathModule from "path"
 import IPC from "./ipc"
 import FilenSDK from "@filen/sdk"
@@ -16,6 +16,7 @@ import serveProd, { SCHEME } from "./lib/serve"
 import WindowState from "./lib/windowState"
 import Status from "./lib/status"
 import Options from "./lib/options"
+import { buildMacAppMenuTemplate } from "./lib/macAppMenu"
 import os from "os"
 
 if (IS_ELECTRON) {
@@ -130,11 +131,12 @@ export class FilenDesktop {
 				return
 			}
 
-			const options = await this.options.get()
-
 			await app.whenReady()
 
-			if (options.startMinimized && process.platform === "darwin") {
+			// Fork: Filen runs as a background agent on macOS - the Dock icon stays hidden at all times (upstream only hides
+			// it with startMinimized / minimize-to-tray). The tray icon, a Dock-less relaunch (`activate`) or a second launch
+			// bring the window back.
+			if (process.platform === "darwin") {
 				app?.dock?.hide()
 			}
 
@@ -172,13 +174,8 @@ export class FilenDesktop {
 					return
 				}
 
-				if (this.driveWindow) {
-					if (this.driveWindow.isMinimized()) {
-						this.driveWindow.restore()
-					}
-
-					this.driveWindow.focus()
-				}
+				// Fork: also un-hide the window (upstream only restores/focuses, which leaves a hidden window hidden).
+				this.showOrOpenDriveWindow()
 			})
 
 			app.setAppUserModelId("io.filen.desktop")
@@ -186,6 +183,12 @@ export class FilenDesktop {
 
 			if (process.platform === "win32") {
 				app.setUserTasks([])
+			}
+
+			// Fork: Cmd+Q hides the window instead of quitting (see buildMacAppMenuTemplate for why only the shortcut is
+			// remapped). Quit for real via the tray "Exit".
+			if (process.platform === "darwin") {
+				Menu.setApplicationMenu(Menu.buildFromTemplate(buildMacAppMenuTemplate(app.getName(), () => this.driveWindow?.hide())))
 			}
 
 			// macOS Dock-icon click: bring back the existing (hidden/minimized) window - never recreate it, since the
@@ -328,6 +331,9 @@ export class FilenDesktop {
 		} else {
 			this.driveWindow?.show()
 		}
+
+		// Fork: without a Dock icon the app is not activated by a Dock click, so make sure the window actually gets focus.
+		this.driveWindow?.focus()
 	}
 
 	private async createMainWindow(): Promise<void> {
@@ -390,11 +396,7 @@ export class FilenDesktop {
 			this.driveWindow = null
 		})
 
-		this.driveWindow?.on("show", () => {
-			if (process.platform === "darwin" && !app?.dock?.isVisible()) {
-				app?.dock?.show()
-			}
-		})
+		// Fork: upstream re-shows the Dock icon whenever the window is shown; the fork keeps it hidden (see initialize()).
 
 		this.driveWindow?.on("close", e => {
 			// An explicit quit, or an already-minimized window, closes normally.
