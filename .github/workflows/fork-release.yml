@@ -1,0 +1,118 @@
+name: Fork release (macOS arm64)
+
+# Fork: builds the ad-hoc signed macOS arm64 app (build/fork/electron-builder.config.cjs), verifies that it auto-updates
+# to a different build of itself, and publishes it as a GitHub release of this fork - the feed fork builds update from.
+# Version: <upstream version in package.json>-fork.<n>, n counted from the existing v<upstream>-fork.* tags.
+#
+# Every push to main is a release: "the fork has an update" means "main moved", and installed builds then show the
+# update button within the hour. Manual dispatch is for re-runs, or build + verify without publishing.
+
+on:
+    push:
+        branches: [main]
+        paths-ignore:
+            - "**.md"
+            - "docs/**"
+            - ".github/ISSUE_TEMPLATE/**"
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Publish the build as a GitHub release (off = build + verify only, artifact kept 7 days)"
+                type: boolean
+                default: true
+
+concurrency:
+    group: fork-release
+    cancel-in-progress: false
+
+jobs:
+    release:
+        name: Build, verify and publish
+        if: github.repository == 'TDHSC/filen-desktop'
+        runs-on: macos-26
+        timeout-minutes: 90
+        permissions:
+            contents: write
+        env:
+            ELECTRON_BUILDER_CACHE: "/tmp/electron-builder-cache"
+            ELECTRON_BUILDER_DOWNLOAD_PATH: "/tmp/electron-download"
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+            - name: Set up Xcode
+              # Icon Composer .icon (mac.icon) needs Xcode 26+ to compile.
+              uses: maxim-lobanov/setup-xcode@v1
+              with:
+                  xcode-version: latest-stable
+            - name: Set up Node
+              uses: actions/setup-node@v6
+              with:
+                  node-version: 24
+                  cache: "npm"
+            - name: Compute fork version
+              id: version
+              run: |
+                  base="$(node -p 'require("./package.json").version')"
+                  last="$(git tag --list "v${base}-fork.*" | sed -E "s/^v${base}-fork\.//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)"
+                  version="${base}-fork.$(( ${last:-0} + 1 ))"
+                  echo "base=$base" >> "$GITHUB_OUTPUT"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+                  echo "Fork version: $version"
+            - name: Install dependencies
+              run: npm ci
+            - name: Fetch rclone binaries
+              run: node build/rclone/fetch.mjs
+            - name: Test
+              run: npm test
+            - name: Build
+              run: npm run build:mac:fork
+              env:
+                  FILEN_FORK_VERSION: ${{ steps.version.outputs.version }}
+            - name: Check the update manifest
+              run: |
+                  cat prod/latest-mac.yml
+                  grep -qx "version: ${{ steps.version.outputs.version }}" prod/latest-mac.yml
+                  grep -q "url: Filen_mac_arm64.zip" prod/latest-mac.yml
+            - name: Verify auto-update to a different build
+              run: bash build/fork/verify-update-macos.sh
+            - name: Upload artifacts
+              if: success()
+              uses: actions/upload-artifact@v7
+              with:
+                  name: Filen-macos-arm64-${{ steps.version.outputs.version }}
+                  retention-days: 7
+                  path: |
+                      prod/Filen_mac_arm64.zip
+                      prod/Filen_mac_arm64.dmg
+                      prod/latest-mac.yml
+                  if-no-files-found: error
+            - name: Publish release
+              if: success() && (github.event_name == 'push' || inputs.publish)
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  VERSION: ${{ steps.version.outputs.version }}
+                  BASE: ${{ steps.version.outputs.base }}
+              run: |
+                  git fetch --no-tags https://github.com/FilenCloudDienste/filen-desktop.git main
+                  fork_commits="$(git log --no-merges --format='- %s' "$(git merge-base HEAD FETCH_HEAD)..HEAD")"
+
+                  cat > /tmp/release-notes.md <<EOF
+                  Based on upstream [Filen v${BASE}](https://github.com/FilenCloudDienste/filen-desktop/releases/tag/v${BASE}).
+
+                  Fork changes on top of upstream:
+                  ${fork_commits}
+
+                  macOS arm64 only, ad-hoc signed (not notarized). Installed fork builds update to this release automatically.
+                  For a fresh install from the dmg/zip, clear the download quarantine first: \`xattr -dr com.apple.quarantine /path/to/Filen.app\`.
+                  EOF
+
+                  gh release create "v${VERSION}" \
+                      --target "$GITHUB_SHA" \
+                      --title "Filen ${VERSION}" \
+                      --notes-file /tmp/release-notes.md \
+                      --latest \
+                      prod/Filen_mac_arm64.zip \
+                      prod/Filen_mac_arm64.dmg \
+                      prod/latest-mac.yml
