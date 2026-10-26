@@ -67,12 +67,13 @@ export class Status {
 					}
 				])
 			)
-		}
 
-		// Handle different icons based on the user's theme (dark/light)
-		nativeTheme.on("updated", () => {
-			this.update()
-		})
+			// Handle different icons based on the user's theme (dark/light). Registered together with the tray so it is
+			// added once - initialize() runs on every main-window creation.
+			nativeTheme.on("updated", () => {
+				this.update()
+			})
+		}
 	}
 
 	public update(): void {
