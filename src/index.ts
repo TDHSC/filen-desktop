@@ -9,6 +9,7 @@ import { IS_ELECTRON } from "./constants"
 import Worker from "./worker"
 import { getAppIcon } from "./assets"
 import Updater from "./lib/updater"
+import ForkUpdates from "./lib/forkUpdates"
 import isDev from "./isDev"
 import Logger, { filenLogsPath } from "./lib/logger"
 import RcloneManager from "./lib/rclone/manager"
@@ -48,6 +49,7 @@ export class FilenDesktop {
 		fs: FS
 	}
 	public updater: Updater
+	public forkUpdates: ForkUpdates
 	public logger: Logger
 	public rclone!: RcloneManager
 	public isUnityRunning: boolean = process.platform === "linux" ? app.isUnityRunning() : false
@@ -92,6 +94,7 @@ export class FilenDesktop {
 		}
 		this.worker = new Worker(this)
 		this.updater = new Updater(this)
+		this.forkUpdates = new ForkUpdates(this)
 		this.logger = new Logger(false, false)
 		this.status = new Status(this)
 		this.options = new Options()
@@ -235,6 +238,8 @@ export class FilenDesktop {
 			this.destroyLauncherWindow()
 
 			setTimeout(() => {
+				// Fork: subscribe before the Updater's first check so that check's result also drives the upstream reminder.
+				this.forkUpdates.initialize()
 				this.updater.initialize()
 			}, 15000)
 
